@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+data/vectorstore/
+data/customer_support.db
+data/customer_support.db-journal
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.DS_Store
+docs/*.pdf
