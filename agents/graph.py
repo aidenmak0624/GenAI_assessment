@@ -10,13 +10,15 @@ Routes user queries to the appropriate agent(s):
 Supports conversation context for follow-up questions.
 """
 
+import re
+from datetime import date
 from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 
-from agents.sql_agent import answer_sql_question
+from agents.sql_agent import answer_sql_question, answer_sql_facts_question
 from agents.rag_agent import answer_rag_question
 
 
@@ -35,9 +37,12 @@ ROUTER_PROMPT = """You are a query router for a customer support system.
 Classify the user's message into exactly one category:
 
 - "sql" -- if the question asks about specific customer data, profiles, orders,
-  support tickets, product info, or anything stored in a database.
+  support tickets, product info, pricing, services, or anything that could be
+  answered from a database. This includes questions about what products or
+  services the company offers.
   Examples: "Show me Ema's profile", "What orders did Liam place?",
-  "List open support tickets", "How many premium customers are there?"
+  "List open support tickets", "How many premium customers are there?",
+  "What is TechCare?", "Show me all products", "What services do you offer?"
 
 - "rag" -- if the question is about company policies, procedures, terms,
   refund policy, privacy policy, support SLAs, or general company rules.
@@ -49,11 +54,53 @@ Classify the user's message into exactly one category:
   "What support SLA applies to Liam given his membership tier?",
   "Check Sophia's ticket history and tell me if her escalation follows policy."
 
-- "general" -- greetings, thanks, or questions unrelated to customer data
-  or company policy.
+- "general" -- ONLY for greetings, thanks, or questions completely unrelated
+  to customer data, products, services, or company policy. When in doubt
+  between "general" and another category, choose the other category.
 
 Respond with ONLY one word: sql, rag, hybrid, or general.
 """
+
+SQL_HINT_TERMS = {
+    "customer", "profile", "order", "orders", "ticket", "tickets", "support ticket",
+    "membership", "tier", "database", "sql", "account", "accounts", "revenue",
+    "premium", "gold", "standard", "email", "phone", "address",
+}
+CATALOG_SQL_HINT_TERMS = {
+    "what products", "show me all products", "list products", "all products",
+    "what services", "services do you offer", "list services", "pricing",
+    "price list", "product catalog", "service catalog",
+}
+RAG_HINT_TERMS = {
+    "policy", "policies", "refund", "return", "privacy", "retention", "document",
+    "documents", "sla", "support plan", "support plans", "coverage", "warranty",
+    "restocking", "terms", "procedure", "procedures",
+}
+HYBRID_HINT_TERMS = {
+    "qualify", "eligible", "still qualify", "still be within", "inside the return window",
+}
+FOLLOW_UP_HINT_PATTERN = (
+    r"\b(it|they|them|their|he|him|his|she|her|hers|that|those|these|this)\b"
+    r"|what about|how about|that order|the policy|the ticket|the customer"
+    r"|the account|that customer|that ticket|that product|that policy"
+)
+
+
+def _keyword_route(question: str) -> str | None:
+    """Apply simple deterministic routing for obvious cases before using the LLM."""
+    lowered = question.lower()
+    has_sql = any(term in lowered for term in SQL_HINT_TERMS)
+    has_catalog_sql = any(term in lowered for term in CATALOG_SQL_HINT_TERMS)
+    has_rag = any(term in lowered for term in RAG_HINT_TERMS)
+    has_hybrid = any(term in lowered for term in HYBRID_HINT_TERMS)
+
+    if has_rag and (has_sql or has_hybrid):
+        return "hybrid"
+    if has_rag:
+        return "rag"
+    if has_sql or has_catalog_sql:
+        return "sql"
+    return None
 
 
 def _build_context_prefix(chat_history: list[dict]) -> str:
@@ -67,10 +114,55 @@ def _build_context_prefix(chat_history: list[dict]) -> str:
     return "Previous conversation:\n" + "\n".join(lines) + "\n\n"
 
 
+def _needs_question_rewrite(question: str) -> bool:
+    """Only rewrite follow-ups that rely on earlier context."""
+    return bool(re.search(FOLLOW_UP_HINT_PATTERN, question.lower()))
+
+
+QUESTION_REWRITE_PROMPT = """Rewrite the user's current message into a standalone
+question using the recent conversation only when needed.
+
+Rules:
+- Preserve the user's original intent exactly.
+- Resolve pronouns or vague references such as "her", "his", "that order",
+  or "the policy" using recent conversation when needed.
+- Remove unrelated details from earlier turns.
+- If the current question is already standalone, return it unchanged.
+- Do not answer the question.
+- Return ONLY the rewritten standalone question.
+"""
+
+
+def _rewrite_question_with_history(
+    question: str,
+    chat_history: list[dict],
+    llm: ChatOpenAI,
+) -> str:
+    """Resolve follow-up references without polluting retrieval with raw chat history."""
+    if not chat_history or not _needs_question_rewrite(question):
+        return question
+
+    context = _build_context_prefix(chat_history)
+    response = llm.invoke([
+        SystemMessage(content=QUESTION_REWRITE_PROMPT),
+        HumanMessage(content=context + f"Current question: {question}"),
+    ])
+    rewritten = response.content.strip()
+    return rewritten or question
+
+
 def route_query(state: AgentState, llm: ChatOpenAI) -> AgentState:
     """Classify the user question and set the route."""
-    context = _build_context_prefix(state.get("chat_history", []))
-    user_msg = context + f"Current question: {state['question']}"
+    rewritten_question = _rewrite_question_with_history(
+        state["question"],
+        state.get("chat_history", []),
+        llm,
+    )
+    heuristic_route = _keyword_route(rewritten_question)
+    if heuristic_route is not None:
+        return {**state, "route": heuristic_route}
+
+    user_msg = f"Current question: {rewritten_question}"
 
     response = llm.invoke([
         SystemMessage(content=ROUTER_PROMPT),
@@ -84,32 +176,67 @@ def route_query(state: AgentState, llm: ChatOpenAI) -> AgentState:
 
 # -- Agent nodes ------------------------------------------------------------
 def sql_node(state: AgentState, llm: ChatOpenAI) -> AgentState:
-    context = _build_context_prefix(state.get("chat_history", []))
-    question = context + state["question"] if context else state["question"]
+    question = _rewrite_question_with_history(
+        state["question"],
+        state.get("chat_history", []),
+        llm,
+    )
     answer = answer_sql_question(question, llm)
     return {**state, "sql_response": answer}
 
 
 def rag_node(state: AgentState, llm: ChatOpenAI) -> AgentState:
-    context = _build_context_prefix(state.get("chat_history", []))
-    question = context + state["question"] if context else state["question"]
+    question = _rewrite_question_with_history(
+        state["question"],
+        state.get("chat_history", []),
+        llm,
+    )
     answer = answer_rag_question(question, llm)
     return {**state, "rag_response": answer}
 
 
 def hybrid_sql_node(state: AgentState, llm: ChatOpenAI) -> AgentState:
     """SQL retrieval step for hybrid queries."""
-    context = _build_context_prefix(state.get("chat_history", []))
-    question = context + state["question"] if context else state["question"]
-    answer = answer_sql_question(question, llm)
+    question = _rewrite_question_with_history(
+        state["question"],
+        state.get("chat_history", []),
+        llm,
+    )
+    answer = answer_sql_facts_question(question, llm)
     return {**state, "sql_response": answer}
+
+
+HYBRID_POLICY_REWRITE_PROMPT = """Rewrite the user's request into a standalone
+policy-document search query.
+
+Rules:
+- Keep only the policy topic or rule that needs to be looked up in documents.
+- Remove customer names, emails, order ids, ticket ids, and database-specific wording.
+- Prefer general policy wording such as return window, refund eligibility,
+  privacy retention, support SLA, escalation rules, or warranty coverage.
+- Return ONLY the rewritten query.
+"""
+
+
+def _rewrite_hybrid_policy_question(question: str, llm: ChatOpenAI) -> str:
+    """Focus hybrid policy lookups on the document-side rule instead of customer facts."""
+    response = llm.invoke([
+        SystemMessage(content=HYBRID_POLICY_REWRITE_PROMPT),
+        HumanMessage(content=question),
+    ])
+    rewritten = response.content.strip()
+    return rewritten or question
 
 
 def hybrid_rag_node(state: AgentState, llm: ChatOpenAI) -> AgentState:
     """RAG retrieval step for hybrid queries."""
-    context = _build_context_prefix(state.get("chat_history", []))
-    question = context + state["question"] if context else state["question"]
-    answer = answer_rag_question(question, llm)
+    question = _rewrite_question_with_history(
+        state["question"],
+        state.get("chat_history", []),
+        llm,
+    )
+    policy_question = _rewrite_hybrid_policy_question(question, llm)
+    answer = answer_rag_question(policy_question, llm)
     return {**state, "rag_response": answer}
 
 
@@ -122,9 +249,19 @@ You have been given information from two sources:
 2. POLICY DOCUMENT RESULTS (company policies, procedures, terms):
 {rag_response}
 
+Today is {today}.
+
 Using BOTH sources, provide a comprehensive, accurate answer to the user's question.
 Clearly indicate which information comes from customer records vs. company policy.
-Be concise but thorough. Use a friendly, professional tone."""
+Be concise but thorough. Use a friendly, professional tone.
+Treat dates in the database as literal facts and compare them against the policy windows.
+Never describe an old purchase as recent. If a policy gives a 15/30/45-day window and
+the customer order date is clearly older than that relative to today, say the customer
+is outside the documented return window.
+If the policy evidence is general rather than product-specific, state that clearly.
+Preserve the explicit source details already included in the agent outputs.
+End with a '---' divider followed by a short '**Source Details:**' section that
+summarizes the database trace and the policy file/page/line references you used."""
 
 
 def synthesize_node(state: AgentState, llm: ChatOpenAI) -> AgentState:
@@ -132,6 +269,7 @@ def synthesize_node(state: AgentState, llm: ChatOpenAI) -> AgentState:
     prompt = SYNTHESIZER_PROMPT.format(
         sql_response=state.get("sql_response", "No data retrieved."),
         rag_response=state.get("rag_response", "No policy information found."),
+        today=date.today().isoformat(),
     )
     response = llm.invoke([
         SystemMessage(content=prompt),

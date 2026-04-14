@@ -12,3 +12,8 @@ build/
 venv/
 .DS_Store
 docs/*.pdf
+docs/policy_sources.json
+node_modules/
+output/
+.playwright-cli/
+.playwright-mcp/

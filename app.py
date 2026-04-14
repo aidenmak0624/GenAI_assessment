@@ -9,6 +9,7 @@ Features:
 """
 
 import os
+import re
 import sys
 import streamlit as st
 from dotenv import load_dotenv
@@ -22,6 +23,30 @@ from agents.graph import build_graph
 from utils.vector_store import build_vector_store, get_vector_store, VECTORSTORE_DIR
 from data.init_db import init_database, DB_PATH
 from data.generate_policies import generate_all_policies, DOCS_DIR
+
+_SOURCE_SECTION_PATTERN = re.compile(
+    r"\n(?:\n)?---\n(?:\n)?(?=(?:\*\*)?(?:Source|SQL|Evidence|Source Details)(?:\*\*)?:)"
+)
+
+
+def _split_message_and_sources(content: str) -> tuple[str, str | None]:
+    """Split an assistant response into visible answer text and hidable sources."""
+    match = _SOURCE_SECTION_PATTERN.search(content)
+    if not match:
+        return content, None
+    answer = content[:match.start()].strip()
+    sources = content[match.end():].strip()
+    return answer, sources or None
+
+
+def _render_message_content(content: str) -> None:
+    """Render the main answer and collapse source details by default."""
+    answer, sources = _split_message_and_sources(content)
+    if answer:
+        st.markdown(answer)
+    if sources:
+        with st.expander("Show sources", expanded=False):
+            st.markdown(sources)
 
 # -- Page config ------------------------------------------------------------
 st.set_page_config(
@@ -44,7 +69,7 @@ with st.sidebar:
     st.subheader("🗄️ System Setup")
 
     # One-click full setup
-    if st.button("🚀 Full Setup (DB + PDFs + Vector Store)", use_container_width=True):
+    if st.button("🚀 Full Setup (DB + Public PDFs + Vector Store)", use_container_width=True):
         if not api_key:
             st.error("Please set your OpenAI API key first.")
         else:
@@ -71,10 +96,10 @@ with st.sidebar:
     # Policy PDF generation
     col3, col4 = st.columns(2)
     with col3:
-        if st.button("Generate Policies", use_container_width=True):
-            with st.spinner("Generating PDFs..."):
+        if st.button("Download Public Policies", use_container_width=True):
+            with st.spinner("Downloading public policy PDFs..."):
                 generate_all_policies()
-            st.success("Policies generated!")
+            st.success("Public policy PDFs downloaded!")
 
     with col4:
         pdf_count = len([f for f in os.listdir(DOCS_DIR) if f.endswith(".pdf")]
@@ -130,16 +155,18 @@ with st.sidebar:
 st.title("🤖 TechCorp Customer Support AI")
 st.caption("Ask about customer data, company policies, or get general support help. "
            "Supports follow-up questions with conversation context.")
+st.info("Click an example to auto-send it, or type your own question in the chat bar "
+        "pinned to the bottom of the page.")
 
 # Quick-start buttons
 st.markdown("**Try these example queries:**")
 examples = [
-    "What is the current refund policy?",
+    "Summarize Best Buy's return policy for most products.",
     "Give me a quick overview of customer Ema's profile and past support ticket details.",
     "List all open support tickets with their priorities.",
-    "Does Ema qualify for a refund on her SmartDesk Hub based on our refund policy?",
+    "Based on Best Buy's return policy, would Ema still qualify for a refund on her SmartDesk Hub?",
     "How many Premium tier customers do we have?",
-    "What data does TechCorp collect about users?",
+    "What does Apple's privacy policy say about retaining personal data?",
 ]
 cols = st.columns(3)
 for i, example in enumerate(examples):
@@ -156,11 +183,14 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         if msg.get("agent_label"):
             st.caption(f"Routed to: {msg['agent_label']}")
-        st.markdown(msg["content"])
+        if msg["role"] == "assistant":
+            _render_message_content(msg["content"])
+        else:
+            st.markdown(msg["content"])
 
 # Handle prefilled example
 prefill = st.session_state.pop("prefill", None)
-prompt = st.chat_input("Ask a question about customers, policies, or support...")
+prompt = st.chat_input("Type your question here and press Enter...")
 
 if prefill:
     prompt = prefill
@@ -181,12 +211,17 @@ if prompt:
         for m in st.session_state.messages[:-1]  # exclude current message
     ]
 
-    # Generate response
+    # Generate response — cache LLM and graph in session state to avoid
+    # re-initialization on every query (reduces latency significantly).
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
-                llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-                graph = build_graph(llm)
+                if "llm" not in st.session_state:
+                    st.session_state.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+                if "graph" not in st.session_state:
+                    st.session_state.graph = build_graph(st.session_state.llm)
+                llm = st.session_state.llm
+                graph = st.session_state.graph
                 result = graph.invoke({
                     "question": prompt,
                     "chat_history": chat_history,
@@ -206,16 +241,14 @@ if prompt:
                     "general": "💬 General Assistant",
                 }
                 agent_label = agent_labels.get(route, route)
-                st.caption(f"Routed to: {agent_label}")
-                st.markdown(response)
             except Exception as e:
                 response = f"An error occurred: {str(e)}"
                 route = "error"
                 agent_label = ""
-                st.error(response)
 
     st.session_state.messages.append({
         "role": "assistant",
         "content": response,
         "agent_label": agent_label if route != "error" else "",
     })
+    st.rerun()

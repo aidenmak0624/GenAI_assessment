@@ -86,10 +86,12 @@ def run_sql_query(query: str) -> list[dict]:
     """Execute a SQL query and return results as list of dicts."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute(query)
-    rows = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query)
+        rows = [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
     return rows
 
 
@@ -103,15 +105,51 @@ def generate_sql(question: str, llm: ChatOpenAI) -> str:
     # Strip markdown fences if present
     if sql.startswith("```"):
         sql = sql.split("\n", 1)[1] if "\n" in sql else sql[3:]
+        # Remove optional language tag (e.g. "sql\n") after the opening fence
+        if sql.lower().startswith("sql"):
+            sql = sql[3:]
     if sql.endswith("```"):
         sql = sql[:-3]
-    sql = sql.strip().lstrip("sql").strip()
+    sql = sql.strip()
     return sql
+
+
+def _tables_used_from_sql(sql: str) -> list[str]:
+    """Extract known table names mentioned in the generated SQL."""
+    tables_used = []
+    lowered = sql.lower()
+    for table_name in ["customers", "products", "orders", "support_tickets"]:
+        if table_name in lowered:
+            tables_used.append(table_name)
+    return tables_used
+
+
+def _format_sql_source(sql: str, tables_used: list[str], row_count: int) -> str:
+    """Create a deterministic SQL trace footer for the user-facing answer."""
+    table_refs = ", ".join(f"`{table}`" for table in tables_used) if tables_used else "`unknown`"
+    compact_sql = " ".join(sql.split())
+    return (
+        f"**Source:** {table_refs} ({row_count} row{'s' if row_count != 1 else ''} returned)\n"
+        f"**SQL:** `{compact_sql}`"
+    )
+
+
+def _format_sql_facts(results: list[dict]) -> str:
+    """Format SQL rows deterministically for hybrid reasoning."""
+    if not results:
+        return "**Database Facts:** No matching customer records were found."
+
+    lines = ["**Database Facts:**"]
+    for index, row in enumerate(results, 1):
+        parts = [f"{key}: {value}" for key, value in row.items()]
+        lines.append(f"- Row {index}: " + ", ".join(parts))
+    return "\n".join(lines)
 
 
 def answer_sql_question(question: str, llm: ChatOpenAI) -> str:
     """Full pipeline: question -> SQL -> validate -> execute -> natural language answer."""
     sql = generate_sql(question, llm)
+    tables_used = _tables_used_from_sql(sql)
 
     # Safety check: only allow SELECT queries
     if not validate_sql_readonly(sql):
@@ -134,6 +172,7 @@ def answer_sql_question(question: str, llm: ChatOpenAI) -> str:
         summary_prompt = (
             f"The user asked: '{question}'\n"
             f"SQL query: {sql}\n"
+            f"Tables queried: {', '.join(tables_used)}\n"
             f"Results ({len(results)} rows):\n{results}\n\n"
             "Summarize these results in a clear, friendly, natural language response. "
             "Include relevant details and format nicely."
@@ -144,4 +183,21 @@ def answer_sql_question(question: str, llm: ChatOpenAI) -> str:
                       "Summarize database query results in a clear, friendly manner."),
         HumanMessage(content=summary_prompt),
     ])
-    return response.content
+    return f"{response.content.strip()}\n\n---\n{_format_sql_source(sql, tables_used, len(results))}"
+
+
+def answer_sql_facts_question(question: str, llm: ChatOpenAI) -> str:
+    """Run a SQL lookup but return only factual database rows for hybrid reasoning."""
+    sql = generate_sql(question, llm)
+    tables_used = _tables_used_from_sql(sql)
+
+    if not validate_sql_readonly(sql):
+        return ("**Database Facts:** The generated database lookup was rejected "
+                "because it was not a safe read-only query.")
+
+    try:
+        results = run_sql_query(sql)
+    except Exception as e:
+        return f"**Database Facts:** I encountered an error querying the database: {e}"
+
+    return f"{_format_sql_facts(results)}\n\n---\n{_format_sql_source(sql, tables_used, len(results))}"

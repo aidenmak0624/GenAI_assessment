@@ -1,5 +1,5 @@
 """
-One-command setup: initializes database, generates policy PDFs,
+One-command setup: initializes the database, downloads public policy PDFs,
 and builds the vector store.
 """
 
@@ -30,7 +30,7 @@ def main():
     print("\n[1/3] Initializing SQLite database...")
     init_database()
 
-    print("\n[2/3] Generating policy PDF documents...")
+    print("\n[2/3] Downloading public policy PDF documents...")
     generate_all_policies()
 
     print("\n[3/3] Building vector store from policy PDFs...")

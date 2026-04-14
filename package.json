@@ -1,0 +1,13 @@
+{
+  "name": "techcorp-customer-support-ai",
+  "private": true,
+  "scripts": {
+    "record:demo": "node scripts/record_demo_video.js",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:report": "playwright show-report output/playwright/report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.2"
+  }
+}
