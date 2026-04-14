@@ -4,7 +4,17 @@ A **Generative AI-powered Multi-Agent System** that enables natural language int
 
 ## Demo Video
 
-🎥 **[Watch the demo video](https://your-demo-video-url-here)**
+<p align="center">
+  <a href="demo_assets/readme/techcorp-demo.mp4">
+    <img src="demo_assets/readme/demo-video-thumbnail.png" alt="Watch the TechCorp Customer Support AI demo video" width="900" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="demo_assets/readme/techcorp-demo.mp4"><strong>Watch the demo video</strong></a>
+</p>
+
+GitHub repository READMEs do not reliably render inline video players, so the preview image above opens the MP4 demo directly from the repository.
 
 For a recording checklist and demo prompts, see [VIDEO_WORKFLOW.md](docs/guides/VIDEO_WORKFLOW.md).
 For a silent-caption version, see [VIDEO_WORKFLOW_NO_VOICE.md](docs/guides/VIDEO_WORKFLOW_NO_VOICE.md).
