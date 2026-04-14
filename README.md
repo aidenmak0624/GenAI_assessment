@@ -5,16 +5,16 @@ A **Generative AI-powered Multi-Agent System** that enables natural language int
 ## Demo Video
 
 <p align="center">
-  <a href="demo_assets/readme/techcorp-demo.mp4">
+  <a href="https://www.loom.com/share/47f4b3035f134bb3831ceaa528bf1aa0">
     <img src="demo_assets/readme/demo-video-thumbnail.png" alt="Watch the TechCorp Customer Support AI demo video" width="900" />
   </a>
 </p>
 
 <p align="center">
-  <a href="demo_assets/readme/techcorp-demo.mp4"><strong>Watch the demo video</strong></a>
+  <a href="https://www.loom.com/share/47f4b3035f134bb3831ceaa528bf1aa0"><strong>Watch the demo video on Loom</strong></a>
 </p>
 
-GitHub repository READMEs do not reliably render inline video players, so the preview image above opens the MP4 demo directly from the repository.
+GitHub repository READMEs do not reliably render inline video players, so the preview image above opens the Loom recording. A local fallback copy is also available at [demo_assets/readme/techcorp-demo.mp4](demo_assets/readme/techcorp-demo.mp4).
 
 For a recording checklist and demo prompts, see [VIDEO_WORKFLOW.md](docs/guides/VIDEO_WORKFLOW.md).
 For a silent-caption version, see [VIDEO_WORKFLOW_NO_VOICE.md](docs/guides/VIDEO_WORKFLOW_NO_VOICE.md).
