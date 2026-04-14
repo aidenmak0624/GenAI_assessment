@@ -21,6 +21,14 @@ For a silent-caption version, see [VIDEO_WORKFLOW_NO_VOICE.md](docs/guides/VIDEO
 
 ---
 
+## Live Demo
+
+🌐 **Streamlit App:** [https://genaiassessment.streamlit.app](https://genaiassessment.streamlit.app)
+
+The deployed Streamlit version of the project is available at the link above.
+
+---
+
 ## Table of Contents
 
 - [Architecture](#architecture)
